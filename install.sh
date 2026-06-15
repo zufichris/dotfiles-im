@@ -99,6 +99,39 @@ install_fonts() {
     sudo pacman -S --needed --noconfirm "${FONTS[@]}"
 }
 
+install_brave() {
+    if command -v brave &>/dev/null; then
+        log "Brave is already installed"
+        return
+    fi
+
+    if ! command -v curl &>/dev/null; then
+        error "curl is required to install Brave."
+        exit 1
+    fi
+
+    log "Installing Brave browser"
+    curl -fsS https://dl.brave.com/install.sh | sh
+}
+
+set_default_browser() {
+    if ! command -v xdg-settings &>/dev/null; then
+        warn "xdg-settings not found. Set the default browser manually."
+        return
+    fi
+
+    log "Setting Brave as the default browser"
+    if xdg-settings set default-web-browser brave.desktop 2>/dev/null; then
+        return
+    fi
+
+    if xdg-settings set default-web-browser brave-browser.desktop 2>/dev/null; then
+        return
+    fi
+
+    warn "Could not set Brave as the default browser. Set it manually."
+}
+
 # ---------------------------------------------------------------------------
 # Config deployment
 # ---------------------------------------------------------------------------
@@ -160,6 +193,11 @@ main() {
 
     if confirm "Install fonts?"; then
         install_fonts
+    fi
+
+    if confirm "Install Brave browser and set it as default?"; then
+        install_brave
+        set_default_browser
     fi
 
     deploy_config
