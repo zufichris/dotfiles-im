@@ -1,213 +1,173 @@
 #!/usr/bin/env bash
-#
-# Install Hyprland, zellij, fonts, and deploy the config.
-#
-# Usage: ./install.sh
-#
-
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET="${HOME}"
+PACKAGES="${DOTFILES}/packages.txt"
+STOW_DIR="${DOTFILES}/stow"
 
-readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly CONFIG_SRC="${REPO_DIR}/.config/hypr"
-readonly CONFIG_DST="${HOME}/.config/hypr"
-readonly SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
-
-# ---------------------------------------------------------------------------
-# Packages
-# ---------------------------------------------------------------------------
-
-readonly PACKAGES=(
-    hyprland
-    ghostty
-    zellij
-    dolphin
-    pipewire
-    pipewire-pulse
-    wireplumber
-    qt5-wayland
-    qt6-wayland
+CONFIG_DIRS=(
+  btop
+  hypr
+  kitty
+  rofi
+  waybar
 )
 
-readonly FONTS=(
-    noto-fonts
-    noto-fonts-emoji
-    ttf-fira-code
-    ttf-nerd-fonts-symbols
-    ttf-nerd-fonts-symbols-mono
-)
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-log()   { echo -e "\033[0;32m[INFO]\033[0m  $*"; }
-warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
-error() { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
-note()  { echo -e "\033[0;34m[NOTE]\033[0m  $*"; }
-
-confirm() {
-    local prompt="$1"
-    local answer
-    read -rp "${prompt} [Y/n] " answer
-    [[ -z "${answer}" || "${answer,,}" == "y" ]]
+log() {
+  printf '==> %s\n' "$*"
 }
 
-# ---------------------------------------------------------------------------
-# Installation
-# ---------------------------------------------------------------------------
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
 
 install_packages() {
-    if ! command -v pacman &>/dev/null; then
-        warn "pacman not found. Install the equivalent packages manually."
-        return
-    fi
+  if [[ "${SKIP_PACKAGES:-0}" == "1" ]]; then
+    log "Skipping package install (SKIP_PACKAGES=1)"
+    return
+  fi
 
-    if ! command -v sudo &>/dev/null; then
-        error "sudo is required for package installation."
-        exit 1
-    fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    log "apt-get not found; install packages from packages.txt manually"
+    return
+  fi
 
-    if pacman -Q pipewire-media-session &>/dev/null; then
-        warn "Removing pipewire-media-session (replaced by wireplumber)"
-        sudo pacman -Rns --noconfirm pipewire-media-session
-    fi
-
-    log "Installing packages: ${PACKAGES[*]}"
-    sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
-
-    log "Enabling PipeWire and WirePlumber user services"
-    systemctl --user enable pipewire.service pipewire-pulse.service wireplumber.service || \
-        warn "Could not enable audio services. Enable them manually after logging in."
+  log "Installing apt packages"
+  sudo apt-get update
+  mapfile -t pkgs < <(grep -Ev '^\s*(#|$)' "$PACKAGES")
+  sudo apt-get install -y "${pkgs[@]}"
 }
 
-install_fonts() {
-    if ! command -v pacman &>/dev/null; then
-        warn "pacman not found. Install the equivalent fonts manually."
-        return
-    fi
+stage_tree() {
+  local src="$1"
+  local dest="$2"
 
-    if ! command -v sudo &>/dev/null; then
-        error "sudo is required for font installation."
-        exit 1
-    fi
+  mkdir -p "$dest"
 
-    log "Installing fonts: ${FONTS[*]}"
-    sudo pacman -S --needed --noconfirm "${FONTS[@]}"
+  while IFS= read -r -d '' path; do
+    local rel="${path#$src/}"
+    [[ -n "$rel" ]] && mkdir -p "${dest}/${rel}"
+  done < <(find "$src" -type d -print0)
+
+  while IFS= read -r -d '' path; do
+    local rel="${path#$src/}"
+    local target="${dest}/${rel}"
+
+    mkdir -p "$(dirname "$target")"
+    ln -sfn "$(realpath --relative-to="$(dirname "$target")" "$path")" "$target"
+  done < <(find "$src" -type f -print0)
 }
 
-install_brave() {
-    if command -v brave &>/dev/null; then
-        log "Brave is already installed"
-        return
-    fi
+stage_config_package() {
+  local app="$1"
+  local stage="${STOW_DIR}/config/${app}"
+  local pkg="${stage}/pkg/dotfiles/${app}"
+  local src="${DOTFILES}/.config/${app}"
 
-    if ! command -v curl &>/dev/null; then
-        error "curl is required to install Brave."
-        exit 1
-    fi
+  rm -rf "$stage"
+  stage_tree "$src" "$pkg"
+  rm -rf "${pkg}/home"
 
-    log "Installing Brave browser"
-    curl -fsS https://dl.brave.com/install.sh | sh
+  stow -d "${stage}/pkg" -t "${HOME}/.config" --restow dotfiles
+  rm -rf "${HOME}/.config/${app}/home"
 }
 
-set_default_browser() {
-    if ! command -v xdg-settings &>/dev/null; then
-        warn "xdg-settings not found. Set the default browser manually."
-        return
-    fi
+stage_local_package() {
+  local stage="${STOW_DIR}/local"
+  local pkg="${stage}/pkg/share"
+  local src="${DOTFILES}/.local/share"
 
-    log "Setting Brave as the default browser"
-    if xdg-settings set default-web-browser brave.desktop 2>/dev/null; then
-        return
-    fi
+  rm -rf "$stage"
+  stage_tree "$src" "$pkg"
 
-    if xdg-settings set default-web-browser brave-browser.desktop 2>/dev/null; then
-        return
-    fi
-
-    warn "Could not set Brave as the default browser. Set it manually."
+  stow -d "${stage}/pkg" -t "${HOME}/.local" --restow share
 }
 
-# ---------------------------------------------------------------------------
-# Config deployment
-# ---------------------------------------------------------------------------
+mirror_config_dirs() {
+  local base="$1"
+  local app="$2"
+  local root="${DOTFILES}/.config/${app}"
 
-deploy_config() {
-    if [[ -e "${CONFIG_DST}" && ! -d "${CONFIG_DST}" ]]; then
-        error "${CONFIG_DST} exists and is not a directory"
-        exit 1
-    fi
-
-    if [[ -d "${CONFIG_DST}" ]]; then
-        local backup="${CONFIG_DST}.backup.$(date +%Y%m%d%H%M%S)"
-        log "Backing up existing config to ${backup}"
-        cp -a "${CONFIG_DST}" "${backup}"
-    fi
-
-    log "Deploying config to ${CONFIG_DST}"
-    mkdir -p "${CONFIG_DST}"
-    cp -v "${CONFIG_SRC}/hyprland.lua" "${CONFIG_DST}/"
-    cp -v "${CONFIG_SRC}/screenShader.frag" "${CONFIG_DST}/"
-
-    if [[ -d "${CONFIG_SRC}/layouts" ]]; then
-        cp -vr "${CONFIG_SRC}/layouts" "${CONFIG_DST}/"
-    fi
+  find "$root" -type d ! -path "$root" -print0 | while IFS= read -r -d '' path; do
+    local rel="${path#$root/}"
+    mkdir -p "${base}/${rel}"
+  done
 }
 
-# ---------------------------------------------------------------------------
-# Optional systemd user services
-# ---------------------------------------------------------------------------
+prepare_stow_targets() {
+  mkdir -p "${HOME}/.config" "${HOME}/.local/share/applications"
 
-install_services() {
-    [[ -f "${CONFIG_SRC}/hyprland.service" || -f "${CONFIG_SRC}/swaybg@.service" ]] || return
+  for dir in "${CONFIG_DIRS[@]}"; do
+    rm -rf "${HOME}/.config/${dir}"
+    mkdir -p "${HOME}/.config/${dir}"
+    mirror_config_dirs "${HOME}/.config/${dir}" "$dir"
+  done
 
-    log "Installing systemd user services"
-    mkdir -p "${SYSTEMD_USER_DIR}"
-
-    [[ -f "${CONFIG_SRC}/hyprland.service" ]] && cp -v "${CONFIG_SRC}/hyprland.service" "${SYSTEMD_USER_DIR}/"
-    [[ -f "${CONFIG_SRC}/swaybg@.service" ]] && cp -v "${CONFIG_SRC}/swaybg@.service" "${SYSTEMD_USER_DIR}/"
-
-    note "Enable with: systemctl --user enable hyprland.service"
+  mkdir -p "${HOME}/.local/share/applications"
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+link_dotfiles() {
+  require_cmd stow
+
+  log "Linking dotfiles into ${TARGET} with GNU Stow"
+  prepare_stow_targets
+
+  for dir in "${CONFIG_DIRS[@]}"; do
+    stage_config_package "$dir"
+  done
+
+  stage_local_package
+}
+
+make_scripts_executable() {
+  log "Making scripts executable"
+  find "${DOTFILES}/.config/hypr/scripts" -type f -exec chmod +x {} +
+  find "${DOTFILES}/.config/waybar/scripts" -type f -exec chmod +x {} +
+  find "${DOTFILES}/.config/rofi/scripts" -type f -exec chmod +x {} +
+  find "${DOTFILES}/.config/waybar/launch.sh" -type f -exec chmod +x {} +
+}
+
+link_wallpapers() {
+  log "Linking wallpapers to ~/Pictures/wallpapers"
+  mkdir -p "${HOME}/Pictures"
+  if [[ -e "${HOME}/Pictures/wallpapers" && ! -L "${HOME}/Pictures/wallpapers" ]]; then
+    rm -rf "${HOME}/Pictures/wallpapers"
+  fi
+  ln -sfnT "${DOTFILES}/wallpapers" "${HOME}/Pictures/wallpapers"
+}
+
+setup_runtime_dirs() {
+  log "Creating runtime directories"
+  mkdir -p "${HOME}/Pictures/screenshots"
+}
+
+setup_desktop_entries() {
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    log "Updating desktop database"
+    update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
+  fi
+}
 
 main() {
-    if [[ ! -d "${CONFIG_SRC}" ]]; then
-        error "Config source not found: ${CONFIG_SRC}"
-        exit 1
-    fi
+  install_packages
+  link_dotfiles
+  link_wallpapers
+  make_scripts_executable
+  setup_runtime_dirs
+  setup_desktop_entries
 
-    log "Packages: ${PACKAGES[*]}"
-    log "Fonts: ${FONTS[*]}"
+  log "Done"
+  cat <<EOF
 
-    if confirm "Install packages?"; then
-        install_packages
-    fi
+Next steps:
+  1. Log into Hyprland (or run: hyprctl reload)
+  2. Start waybar: ~/.config/waybar/launch.sh
 
-    if confirm "Install fonts?"; then
-        install_fonts
-    fi
-
-    if confirm "Install Brave browser and set it as default?"; then
-        install_brave
-        set_default_browser
-    fi
-
-    deploy_config
-
-    if confirm "Install systemd user services?"; then
-        install_services
-    fi
-
-    log "Done."
-    note "Start Hyprland with: Hyprland"
+EOF
 }
 
 main "$@"
