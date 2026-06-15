@@ -12,7 +12,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly CONFIG_SRC="${REPO_DIR}/hypr"
+readonly CONFIG_SRC="${REPO_DIR}/.config/hypr"
 readonly CONFIG_DST="${HOME}/.config/hypr"
 readonly SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 
